@@ -17,19 +17,22 @@ from distutils.version import LooseVersion
 
 import horovod.tensorflow as hvd
 import tensorflow as tf
+from horovod.common.gradient_aggregation import LocalGradientAggregationHelper
 
 
 _PRE_TF_2_4_0 = LooseVersion(tf.__version__) < LooseVersion('2.4.0')
 
 
 def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sparse,
-                                 compression, sparse_as_dense, gradient_predivide_factor):
+                                 compression, sparse_as_dense, gradient_predivide_factor,
+                                 aggregation_frequency, average_aggregated_gradients):
     class _DistributedOptimizer(keras.optimizers.Optimizer):
         _HAS_AGGREGATE_GRAD = True
 
         def __init__(self, **kwargs):
             self._name = name or "Distributed%s" % self.__class__.__base__.__name__
             self._aggregated_gradients = False
+
             self._allreduce_grads = hvd._make_allreduce_grads_fn(
                 self._name,
                 device_dense,
@@ -98,6 +101,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                                 '`get_gradients()` or `_aggregate_gradients`. If you\'re '
                                 'using TensorFlow 2.0, please specify '
                                 '`experimental_run_tf_function=False` in `compile()`.')
+
             return result
 
     # We dynamically create a new class that inherits from the optimizer that was passed in.
@@ -106,6 +110,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
     # model could be easily restored without Horovod.
     cls = type(optimizer.__class__.__name__, (optimizer.__class__,),
                dict(_DistributedOptimizer.__dict__))
+
     return cls.from_config(optimizer.get_config())
 
 
