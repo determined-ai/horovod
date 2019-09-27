@@ -78,7 +78,10 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                                 grad = tf.convert_to_tensor(grad)
                             elif isinstance(grad, tf.IndexedSlices):
                                 raise AssertionError(
-                                    "IndexedSlices are not supported when `self._aggregation_frequency` > 1 and `self._sparse_as_dense is False")
+                                    "IndexedSlices are not supported when "
+                                    "`self._aggregation_frequency` > 1 and "
+                                    "`self._sparse_as_dense` is False"
+                                )
                             if self.grad_updated_sizes_dict:
                                 if str(idx) not in self.grad_updated_sizes_dict:
                                     raise AssertionError
@@ -156,7 +159,13 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                         reset_op = self.counter.assign(
                             tf.constant(0), use_locking=True)
                     with tf.control_dependencies([reset_op]):
-                        return [tf.divide(g, self._aggregation_frequency) for g in averaged_gradients]
+                        if self._aggregation_frequency > 1:
+                            return [tf.divide(g, self._aggregation_frequency) for g in averaged_gradients]
+                        else:
+                            # When grad updates are represented in `IndexedSlices`, we can not divide
+                            # them by int. Currently _aggregation_frequency > 1 is not supported
+                            # `IndexedSlices`.
+                            return [tf.identity(g) for g in averaged_gradients]
 
             self._get_gradients_used = True
             self.grads = super(
@@ -176,12 +185,14 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                 else:
                     update_ops = []
                 with tf.control_dependencies(update_ops):
-                    return tf.cond(
-                        tf.logical_or(tf.equal(self._aggregation_frequency, 1), tf.equal(
-                            self.counter, self._aggregation_frequency)),
-                        allreduce_grads,
-                        lambda: self.grads,
-                    )
+                    if self._aggregation_frequency > 1:
+                        return tf.cond(
+                            tf.equal(self.counter, self._aggregation_frequency),
+                            allreduce_grads,
+                            lambda: self.grads,
+                        )
+                    else:
+                        return allreduce_grads()
             else:
                 return self.grads
 
