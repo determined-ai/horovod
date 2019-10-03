@@ -13,16 +13,21 @@
 # limitations under the License.
 # ==============================================================================
 
+import json
+import os
+import threading
+
 import horovod.tensorflow as hvd
 import tensorflow as tf
 
 
 def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sparse,
                                  compression, sparse_as_dense, aggregation_frequency,
-                                 grad_updated_sizes_dict):
+                                 grad_updated_sizes_dict, profile_frequency, profile_filename):
     class _DistributedOptimizer(keras.optimizers.Optimizer):
         def __init__(self, name, device_dense, device_sparse, compression, sparse_as_dense,
-                     config, aggregation_frequency, grad_updated_sizes_dict):
+                     config, aggregation_frequency, grad_updated_sizes_dict, profile_frequency,
+                     profile_filename):
             if name is None:
                 name = "Distributed%s" % self.__class__.__base__.__name__
             self._name = name
@@ -35,6 +40,11 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
             # How often are parameters synchronized
             self._aggregation_frequency = aggregation_frequency
             assert self._aggregation_frequency > 0
+
+            self._profile_frequency = profile_frequency
+            assert self._profile_frequency >= 0
+
+            self._profile_filename = profile_filename
 
             # A dictionary containing the shape of each grad.
             # This is used when gradient aggregation frequency > 1 and
@@ -50,6 +60,13 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
             # equal to 0.
             self.counter = None
 
+            # Used to know when to add profile logging. We profile when `self.profile_counter`
+            # is equal to `self._profile_frequency`.
+            self.profile_counter = None
+
+            # Used to know start of a batch for duration profiling.
+            self.start_timestamp = None
+
             super(self.__class__, self).__init__(**config)
 
         def get_gradients(self, loss, params):
@@ -61,6 +78,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
             In DistributedOptimizer, get_gradients() is overriden to also
             allreduce the gradients before returning them.
             """
+
             def init_aggregation_vars():
                 v = tf.get_collection('aggregation_variables')
                 vars_init_op = tf.variables_initializer(v)
@@ -69,6 +87,9 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                 with tf.variable_scope("aggregation_variables"):
                     self.counter = tf.get_variable(
                         "aggregation_counter", shape=(), dtype=tf.int32,
+                        trainable=False, initializer=tf.zeros_initializer())
+                    self.profile_counter = tf.get_variable(
+                        "profile_counter", shape=(), dtype=tf.int32,
                         trainable=False, initializer=tf.zeros_initializer())
                     if self._aggregation_frequency > 1:
                         for idx, grad in enumerate(self.grads):
@@ -96,7 +117,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                                 grad_aggregation_variable)
                         assert len(self.gpu_shadow_vars) == len(self.grads)
                     vars_init_op = tf.variables_initializer(
-                        [self.counter, *self.gpu_shadow_vars])
+                        [self.counter, self.profile_counter, *self.gpu_shadow_vars])
                     sess.run(vars_init_op)
 
             def clear_grads():
@@ -167,32 +188,135 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                             # `IndexedSlices`.
                             return [tf.identity(g) for g in averaged_gradients]
 
+            def trim_last_curly_brace(s):
+                if s[-1] != "}":
+                    raise AssertionError(
+                        f'Expected last character in "{s}" to be "}}", but got "{s[-1]}"'
+                    )
+                return s[:-1]
+
+            def profile_start():
+                if not self._profile_frequency or not self._profile_filename:
+                    return tf.no_op()
+                return tf.cond(
+                    tf.equal(self.profile_counter, self._profile_frequency - 1),
+                    log_comm_start,
+                    tf.no_op,
+                )
+
+            def log_comm_start():
+                """
+                Log communication end profiling information.
+
+                Returns a tf.print operation that writes profiling information
+                for the start of communication to a file in the chrome://tracing
+                format.
+                """
+                profile_base_info = trim_last_curly_brace(
+                    get_profile_info("communication", "B")
+                )
+                # The chrome://tracing utility uses milliseconds since epoch
+                # but timestamp is seconds since epoch. Multiply by 1e6 to get
+                # milliseconds.
+                self.start_timestamp = tf.timestamp() * 1e6
+                return tf.print(
+                    profile_base_info,
+                    ', "ts": ',
+                    self.start_timestamp,
+                    "}",
+                    sep="",
+                    output_stream=f"file://{self._profile_filename}",
+                )
+
+            def get_profile_info(name, phase, **kwargs):
+                info = {
+                    "name": name,
+                    "pid": os.getpid(),
+                    "tid": threading.current_thread().ident,
+                    "ph": phase,
+                }
+                info.update(kwargs)
+                return json.dumps(info)
+
+            def profile_end():
+                if not self._profile_frequency or not self._profile_filename:
+                    return tf.no_op()
+                cond = tf.cond(
+                    tf.equal(self.profile_counter, self._profile_frequency - 1),
+                    log_comm_end,
+                    tf.no_op,
+                )
+                with tf.control_dependencies([cond]):
+                    return tf.cond(
+                        tf.equal(self.profile_counter, self._profile_frequency - 1),
+                        clear_profile_counter,
+                        increment_profile_counter,
+                    )
+
+            def log_comm_end():
+                """
+                Log communication end profiling information.
+
+                Returns a tf.print operation that writes profiling information
+                for the end of communication to a file in the chrome://tracing
+                format.
+                """
+                profile_base_info = trim_last_curly_brace(
+                    get_profile_info("communication", "E")
+                )
+                # The chrome://tracing utility uses milliseconds since epoch
+                # but timestamp is seconds since epoch.  Multiply by 1e6 to get
+                # milliseconds.
+                end_timestamp = tf.timestamp() * 1e6
+                duration = end_timestamp - self.start_timestamp
+                return tf.print(
+                    profile_base_info,
+                    ', "ts": ',
+                    end_timestamp,
+                    ', "duration": ',
+                    duration,
+                    "}",
+                    sep="",
+                    output_stream=f"file://{self._profile_filename}",
+                )
+
+            def clear_profile_counter():
+                return self.profile_counter.assign(0)
+
+            def increment_profile_counter():
+                return self.profile_counter.assign_add(1)
+
             self._get_gradients_used = True
             self.grads = super(
                 self.__class__, self).get_gradients(loss, params)
             init_aggregation_vars()
             if hvd.size() > 1:
-                if self._aggregation_frequency > 1:
-                    with tf.variable_scope("aggregation_variables", reuse=True):
-                        clear_op = tf.cond(
-                            tf.equal(self.counter, 0), clear_grads, tf.no_op)
-                        with tf.control_dependencies([clear_op]):
-                            aggregation_ops_list = aggregate_grads()
+                with tf.control_dependencies([profile_start()]):
+                    if self._aggregation_frequency > 1:
+                        with tf.variable_scope("aggregation_variables", reuse=True):
+                            clear_op = tf.cond(
+                                tf.equal(self.counter, 0), clear_grads, tf.no_op)
+                            with tf.control_dependencies([clear_op]):
+                                aggregation_ops_list = aggregate_grads()
 
-                    aggregation_ops = tf.group(*aggregation_ops_list)
-                    with tf.control_dependencies([aggregation_ops]):
-                        update_ops = [self.counter.assign_add(tf.constant(1))]
-                else:
-                    update_ops = []
+                        aggregation_ops = tf.group(*aggregation_ops_list)
+                        with tf.control_dependencies([aggregation_ops]):
+                            update_ops = [self.counter.assign_add(tf.constant(1))]
+                    else:
+                        update_ops = [tf.no_op()]
                 with tf.control_dependencies(update_ops):
                     if self._aggregation_frequency > 1:
-                        return tf.cond(
+                        allreduced_grads = tf.cond(
                             tf.equal(self.counter, self._aggregation_frequency),
                             allreduce_grads,
                             lambda: self.grads,
                         )
                     else:
-                        return allreduce_grads()
+                        allreduced_grads = allreduce_grads()
+                with tf.control_dependencies(allreduced_grads):
+                    comm_end = profile_end()
+                with tf.control_dependencies([comm_end]):
+                    return [tf.identity(grad) for grad in allreduced_grads]
             else:
                 return self.grads
 
@@ -215,7 +339,8 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
     cls = type(optimizer.__class__.__name__, (optimizer.__class__,),
                dict(_DistributedOptimizer.__dict__))
     return cls(name, device_dense, device_sparse, compression, sparse_as_dense,
-               optimizer.get_config(), aggregation_frequency, grad_updated_sizes_dict)
+               optimizer.get_config(), aggregation_frequency, grad_updated_sizes_dict, profile_frequency,
+               profile_filename)
 
 
 def _eval(backend, op_or_result):
