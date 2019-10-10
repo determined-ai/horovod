@@ -180,10 +180,13 @@ class RendezvousServer:
     # Rendezvous function finds a available port, create http socket,
     # and start listening loop to handle request
     # self.httpd.init needs to be called after server start
-    def start(self, handler_cls=RendezvousHandler):
+    def start(self, pedl_provisioned_port, handler_cls=RendezvousHandler):
         self._httpd, port = find_port(
             lambda addr: RendezvousHTTPServer(
-                addr, handler_cls, self._verbose))
+                addr, handler_cls, self._verbose),
+            pedl_provisioned_port=pedl_provisioned_port,
+            verbose=self._verbose,
+        )
         if self._verbose:
             logging.info('Rendezvous INFO: HTTP rendezvous server started.')
 

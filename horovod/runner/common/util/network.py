@@ -91,7 +91,10 @@ class BasicService(object):
         self._nics = nics
         self._server, _ = find_port(
             lambda addr: socketserver.ThreadingTCPServer(
-                addr, self._make_handler()))
+                addr, self._make_handler()),
+            pedl_provisioned_port=0,
+            verbose=False,
+        )
         self._server._block_on_close = True
         self._port = self._server.socket.getsockname()[1]
         self._addresses = self._get_local_addresses()

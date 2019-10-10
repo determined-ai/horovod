@@ -73,7 +73,20 @@ def filter_local_addresses(all_host_names):
 
 
 # Given server factory, find a usable port
-def find_port(server_factory):
+def find_port(server_factory, pedl_provisioned_port, verbose):
+    if verbose:
+        print(f"Find port pedl_provisioned_port: {pedl_provisioned_port}.")
+    if pedl_provisioned_port:
+        try:
+            addr = ('', pedl_provisioned_port)
+            server = server_factory(addr)
+            if verbose:
+                print(f"Find port connected to {pedl_provisioned_port}.")
+            return server, pedl_provisioned_port
+        except Exception as e:
+            pass
+        raise Exception(f"Unable to bind to pedl_provisioned_port {pedl_provisioned_port}.")
+
     min_port = 1024
     max_port = 65536
     num_ports = max_port - min_port
@@ -83,6 +96,8 @@ def find_port(server_factory):
             port = min_port + (start_port + port_offset) % num_ports
             addr = ('', port)
             server = server_factory(addr)
+            if verbose:
+                print(f"Find port connected to {port}.")
             return server, port
         except Exception as e:
             pass
