@@ -90,7 +90,10 @@ class BasicService(object):
         self._wire = Wire(key)
         self._server, _ = find_port(
             lambda addr: socketserver.ThreadingTCPServer(
-                addr, self._make_handler()))
+                addr, self._make_handler()),
+            pedl_provisioned_port=0,
+            verbose=False,
+        )
         self._port = self._server.socket.getsockname()[1]
         self._thread = threading.Thread(target=self._server.serve_forever)
         self._thread.daemon = True

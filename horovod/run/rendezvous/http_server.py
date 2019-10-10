@@ -179,10 +179,13 @@ class RendezvousServer:
 
     # Rendezvous function finds a available port, create http socket,
     # and start listening loop to handle request
-    def start_server(self, host_alloc_plan):
+    def start_server(self, host_alloc_plan, pedl_provisioned_port):
         self.httpd, port = find_port(
             lambda addr: RendezvousHTTPServer(
-                addr, RendezvousHandler, self.verbose))
+                addr, RendezvousHandler, self.verbose),
+            pedl_provisioned_port=pedl_provisioned_port,
+            verbose=self.verbose,
+        )
         self.httpd.extract_scope_size(host_alloc_plan)
         if self.verbose:
             print('Rendezvous INFO: HTTP rendezvous server started.')
