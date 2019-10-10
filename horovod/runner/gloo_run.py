@@ -234,7 +234,8 @@ def launch_gloo(command, exec_command, settings, nics, env, server_ip):
     host_alloc_plan = get_host_assignments(hosts, settings.num_proc)
 
     # start global rendezvous server and get port that it is listening on
-    global_rendezv_port = rendezvous.start()
+    pedl_provisioned_port = int(os.environ.get('PEDL_HOROVOD_GLOO_RENDEZVOUS_PORT', 0))
+    global_rendezv_port = rendezvous.start(pedl_provisioned_port=pedl_provisioned_port)
     rendezvous.init(host_alloc_plan)
     run_command = get_run_command(command, server_ip, nics, global_rendezv_port)
 
