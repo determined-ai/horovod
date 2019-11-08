@@ -233,7 +233,7 @@ if _LegacyOptimizer is not None:
 
         def __init__(self, optimizer, name=None, use_locking=False, device_dense='',
                     device_sparse='', compression=Compression.none,
-                    sparse_as_dense=False):
+                    sparse_as_dense=False, aggregation_frequency=1):
             if name is None:
                 name = "Distributed{}".format(type(optimizer).__name__)
             super(_DistributedOptimizer, self).__init__(name=name, use_locking=use_locking)
@@ -241,6 +241,20 @@ if _LegacyOptimizer is not None:
             self._optimizer = optimizer
             self._allreduce_grads = _make_allreduce_grads_fn(
                 name, device_dense, device_sparse, compression, sparse_as_dense)
+
+
+            # How often are parameters synchronized
+            self._aggregation_frequency = aggregation_frequency
+            assert self._aggregation_frequency > 0
+
+            # This is going to be N data structure holding the aggregated gradient updates
+            # for parameter updates. N is the number of parameters.
+            self.gpu_shadow_vars = []
+
+            # Used to know when to allreduce and apply gradients. We allreduce when `self.counter`
+            # is equal to `self._aggregation_frequency`. We apply gradients when `self.counter` is
+            # equal to 0.
+            self.counter = None
 
         def compute_gradients(self, *args, **kwargs):
             """Compute gradients of all trainable variables.
@@ -250,17 +264,118 @@ if _LegacyOptimizer is not None:
             In DistributedOptimizer, compute_gradients() is overriden to also
             allreduce the gradients before returning them.
             """
+
+            def init_aggregation_vars():
+                with tf.variable_scope("aggregation_variables"):
+                    self.counter = tf.get_variable(
+                        "aggregation_counter", shape=(), dtype=tf.int32,
+                        trainable=False, initializer=tf.zeros_initializer())
+                    if self._aggregation_frequency > 1:
+                        for idx, grad in enumerate(self.grads):
+                            grad_aggregation_variable_name = str(idx)
+                            grad_aggregation_variable = tf.get_variable(
+                                grad_aggregation_variable_name, shape=grad.get_shape().as_list(),
+                                trainable=False, initializer=tf.zeros_initializer(), dtype=tf.float64,
+                                collections=[tf.GraphKeys.LOCAL_VARIABLES, "aggregating_collection"])
+                            self.gpu_shadow_vars.append(grad_aggregation_variable)
+                        assert len(self.gpu_shadow_vars) == len(self.grads)
+
+            def clear_grads():
+                clear_ops_list = []
+                for idx, grad in enumerate(self.gpu_shadow_vars):
+                    grad_aggregation_variable_name = str(idx)
+                    grad_aggregator = tf.get_variable(
+                        grad_aggregation_variable_name, dtype=tf.float64)
+                    clear_op = grad_aggregator.assign(
+                        grad_aggregator.initial_value)
+                    clear_ops_list.append(clear_op)
+                return tf.group(*clear_ops_list)
+
+            def aggregate_grads():
+                aggregation_ops_list = []
+                if self._aggregation_frequency > 1:
+                    for idx, grad in enumerate(self.grads):
+                        grad_aggregation_variable_name = str(idx)
+                        grad_aggregator = tf.get_variable(
+                            grad_aggregation_variable_name, dtype=tf.float64)
+                        update_op = grad_aggregator.assign_add(grad)
+                        aggregation_ops_list.append(update_op)
+                return aggregation_ops_list
+
+            def allreduce_grads():
+                if self._aggregation_frequency > 1:
+                    # Read in latest variables values.
+                    aggregated_grads = []
+                    aggregation_read_ops_list = []
+                    with tf.variable_scope("aggregation_variables", reuse=True):
+                        for idx, grad in enumerate(self.gpu_shadow_vars):
+                            grad_aggregation_variable_name = str(idx)
+                            grad_aggregator = tf.get_variable(
+                                grad_aggregation_variable_name, dtype=tf.float64)
+                            aggregated_grads.append(
+                                grad_aggregator.read_value())
+                            aggregation_read_ops_list.append(
+                                aggregated_grads[idx])
+                    aggregation_read_ops = tf.group(
+                        *aggregation_read_ops_list)
+                else:
+                    aggregated_grads = self.grads
+                    aggregation_read_ops = tf.no_op()
+
+                with tf.control_dependencies([aggregation_read_ops]):
+                    averaged_gradients = self._allreduce_grads(self.grads)
+                    with tf.control_dependencies([g.op for g in averaged_gradients]):
+                        reset_op = self.counter.assign(
+                            tf.constant(0), use_locking=True)
+                    with tf.control_dependencies([reset_op]):
+                        if self._aggregation_frequency > 1:
+                            return tuple(tf.divide(g, self._aggregation_frequency) for g in averaged_gradients)
+                        else:
+                            # When grad updates are represented in `IndexedSlices`, we can not divide
+                            # them by int. Currently _aggregation_frequency > 1 is not supported
+                            # `IndexedSlices`.
+                            return tuple(tf.identity(g) for g in averaged_gradients)
+
+
             gradients = self._optimizer.compute_gradients(*args, **kwargs)
             if size() > 1:
-                grads, vars = zip(*gradients)
-                avg_grads = self._allreduce_grads(grads)
-                return list(zip(avg_grads, vars))
+                self.grads, vars = zip(*gradients)
+                init_aggregation_vars()
+
+                if self._aggregation_frequency > 1:
+                    with tf.variable_scope("aggregation_variables", reuse=True):
+                        clear_op = tf.cond(tf.equal(self.counter, 0), clear_grads, tf.no_op)
+                        with tf.control_dependencies([clear_op]):
+                            aggregation_ops_list = aggregate_grads()
+
+                        aggregation_ops = tf.group(*aggregation_ops_list)
+                        with tf.control_dependencies([aggregation_ops]):
+                            update_ops = [self.counter.assign_add(tf.constant(1))]
+                else:
+                    update_ops = [tf.no_op()]
+
+                with tf.control_dependencies(update_ops):
+                    if self._aggregation_frequency > 1:
+                        allreduced_grads = tf.cond(
+                            tf.equal(self.counter, self._aggregation_frequency),
+                            allreduce_grads,
+                            lambda: self.grads,
+                        )
+                    else:
+                        allreduced_grads = allreduce_grads()
+
+                with tf.control_dependencies([tf.group(*allreduced_grads)]):
+                    allreduced_grads = tuple(tf.identity(grad) for grad in allreduced_grads)
+
+                return list(zip(allreduced_grads, vars))
             else:
                 return gradients
 
         def apply_gradients(self, *args, **kwargs):
             """Calls this same method on the underlying optimizer."""
-            return self._optimizer.apply_gradients(*args, **kwargs)
+            flattended_args0 = [item for tup in args[0] for item in tup]
+            with tf.control_dependencies([tf.group(*flattended_args0)]):
+                return tf.cond(tf.equal(self.counter, 0), lambda: self._optimizer.apply_gradients(*args, **kwargs), tf.no_op)
 
         def get_slot(self, *args, **kwargs):
             """Calls this same method on the underlying optimizer."""
@@ -277,7 +392,7 @@ if _LegacyOptimizer is not None:
 
 def DistributedOptimizer(optimizer, name=None, use_locking=False, device_dense='',
                          device_sparse='', compression=Compression.none,
-                         sparse_as_dense=False):
+                         sparse_as_dense=False, aggregation_frequency=1):
     """Construct a new DistributedOptimizer, which uses another optimizer
     under the hood for computing single-process gradient values and
     applying gradient updates after the gradient values have been averaged
@@ -307,10 +422,12 @@ def DistributedOptimizer(optimizer, name=None, use_locking=False, device_dense='
         Treat all sparse gradients as dense tensors.  This can help improve
         performance and memory utilization if the original sparse gradient
         has high density.  Defaults to false.
+      aggregation_frequency: How many batches to aggregate the gradients before
+                             averaging the gradients with allreduce.
     """
     if isinstance(optimizer, _LegacyOptimizer):
         return _DistributedOptimizer(optimizer, name, use_locking, device_dense,
-                                     device_sparse, compression, sparse_as_dense)
+                                     device_sparse, compression, sparse_as_dense, aggregation_frequency)
     elif isinstance(optimizer, tf.keras.optimizers.Optimizer):
         import horovod.tensorflow.keras as hvd_k
         return hvd_k.DistributedOptimizer(optimizer, name, device_dense, device_sparse,
