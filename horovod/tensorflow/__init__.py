@@ -243,7 +243,7 @@ if _LegacyOptimizer is not None:
             self._allreduce_grads = _make_allreduce_grads_fn(
                 name, device_dense, device_sparse, compression, sparse_as_dense)
 
-            self._agg_helper = LocalGradientAggregationHelper(aggregation_frequency, self._allreduce_grads)
+            self._agg_helper = LocalGradientAggregationHelper(aggregation_frequency, self._allreduce_grads, sparse_as_dense, None)
 
         def compute_gradients(self, *args, **kwargs):
             """Compute gradients of all trainable variables.

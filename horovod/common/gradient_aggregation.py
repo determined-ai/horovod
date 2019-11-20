@@ -2,7 +2,8 @@ import tensorflow as tf
 
 
 class LocalGradientAggregationHelper:
-    def __init__(self, aggregation_frequency, allreduce_func):
+    def __init__(self, aggregation_frequency, allreduce_func, sparse_as_dense,
+                 grad_updated_sizes_dict):
         self._allreduce_grads = allreduce_func
 
         # How often are parameters synchronized
@@ -18,20 +19,49 @@ class LocalGradientAggregationHelper:
         # equal to 0.
         self.counter = None
 
-    def init_aggregation_vars(self, grads):
+        self._sparse_as_dense = sparse_as_dense
+
+        # A dictionary containing the shape of each grad.
+        # This is used when gradient aggregation frequency > 1 and
+        # there are grads that have dynamically set shapes.
+        self.grad_updated_sizes_dict = grad_updated_sizes_dict
+
+    def init_aggregation_vars(self, grads, sess=None):
         with tf.variable_scope("aggregation_variables"):
             self.counter = tf.get_variable(
                 "aggregation_counter", shape=(), dtype=tf.int32,
                 trainable=False, initializer=tf.zeros_initializer())
             if self.aggregation_frequency > 1:
                 for idx, grad in enumerate(grads):
+                    if self._sparse_as_dense and isinstance(grad, tf.IndexedSlices):
+                        grad = tf.convert_to_tensor(grad)
+                    elif isinstance(grad, tf.IndexedSlices):
+                        raise AssertionError(
+                            "IndexedSlices are not supported when "
+                            "`self._aggregation_frequency` > 1 and "
+                            "`self._sparse_as_dense` is False"
+                        )
+                    if self.grad_updated_sizes_dict:
+                        if str(idx) not in self.grad_updated_sizes_dict:
+                            raise AssertionError
+                        tensor_shape = self.grad_updated_sizes_dict[str(idx)]
+                    else:
+                        tensor_shape = grad.get_shape().as_list()
                     grad_aggregation_variable_name = str(idx)
                     grad_aggregation_variable = tf.get_variable(
-                        grad_aggregation_variable_name, shape=grad.get_shape().as_list(),
+                        grad_aggregation_variable_name, shape=tensor_shape,
                         trainable=False, initializer=tf.zeros_initializer(), dtype=grad.dtype,
                         collections=[tf.GraphKeys.LOCAL_VARIABLES, "aggregating_collection"])
                     self.gpu_shadow_vars.append(grad_aggregation_variable)
                 assert len(self.gpu_shadow_vars) == len(grads)
+
+        # We expect to get a `sess` when we need to manually do a `sess.run(...)`
+        # for the variables to be initialized.
+        if sess:
+            vars_init_op = tf.variables_initializer(
+                [self.counter, *self.gpu_shadow_vars]
+            )
+            sess.run(vars_init_op)
 
     def _clear_grads(self):
         clear_ops_list = []
@@ -45,6 +75,8 @@ class LocalGradientAggregationHelper:
         aggregation_ops_list = []
         if self.aggregation_frequency > 1:
             for idx, grad in enumerate(grads):
+                if self._sparse_as_dense and isinstance(grad, tf.IndexedSlices):
+                    grad = tf.convert_to_tensor(grad)
                 grad_aggregator = self.gpu_shadow_vars[idx]
                 updated_grad_aggregator = grad_aggregator.assign_add(grad)
                 aggregation_ops_list.append(updated_grad_aggregator)
