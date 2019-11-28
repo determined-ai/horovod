@@ -46,6 +46,23 @@ class HorovodRunDriverClient(driver_service.BasicDriverClient):
             match_intf=match_intf)
 
 
+def get_ssh_port_args(all_host_names, ssh_port=None, ssh_ports=None):
+    if ssh_port and ssh_ports:
+        raise ValueError("You can only specify one of `--ssh-port` and `--ssh-ports`")
+
+    if ssh_ports:
+        sp_ssh_ports = ssh_ports.split(",")
+        if len(sp_ssh_ports) != len(all_host_names):
+            raise ValueError("If specifying multiple ssh ports, it must be "
+                             "supplied as a comma-separated string of the same "
+                             "length as the host names. Expected "
+                             f"{len(all_host_names)} ssh ports, but parsed "
+                             f"{len(sp_ssh_ports)} ports from {ssh_ports}... {all_host_names}")
+        return [port for port in sp_ssh_ports ]
+
+    return [ssh_port for _ in range(len(all_host_names))]
+
+
 def _launch_task_servers(all_host_names, local_host_names, driver_addresses,
                          settings):
     """
@@ -89,6 +106,12 @@ def _launch_task_servers(all_host_names, local_host_names, driver_addresses,
             host_output.close()
         return exit_code
 
+    ssh_port_per_host = get_ssh_port_args(
+        all_host_names,
+        ssh_port=settings.ssh_port,
+        ssh_ports=settings.ssh_ports
+    )
+
     args_list = []
     num_hosts = len(all_host_names)
     for index in range(num_hosts):
@@ -96,15 +119,15 @@ def _launch_task_servers(all_host_names, local_host_names, driver_addresses,
         command = \
             '{python} -m horovod.runner.task_fn {index} {num_hosts} ' \
             '{driver_addresses} {settings}' \
-            .format(python=sys.executable,
-                    index=codec.dumps_base64(index),
-                    num_hosts=codec.dumps_base64(num_hosts),
-                    driver_addresses=codec.dumps_base64(driver_addresses),
-                    settings=codec.dumps_base64(settings))
+                .format(python=sys.executable,
+                        index=codec.dumps_base64(index),
+                        num_hosts=codec.dumps_base64(num_hosts),
+                        driver_addresses=codec.dumps_base64(driver_addresses),
+                        settings=codec.dumps_base64(settings))
         if host_name not in local_host_names:
             command = get_remote_command(command,
                                          host=host_name,
-                                         port=settings.ssh_port,
+                                         port=ssh_port_per_host[index],
                                          identity_file=settings.ssh_identity_file)
 
         if settings.verbose >= 2:
