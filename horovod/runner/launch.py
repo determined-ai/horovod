@@ -55,7 +55,7 @@ SSH_CONNECT_TIMEOUT_S = 10
 
 
 @cache.use_cache()
-def _check_all_hosts_ssh_successful(host_addresses, ssh_port=None, ssh_identity_file=None):
+def _check_all_hosts_ssh_successful(host_addresses, ssh_port=None, ssh_ports=None, ssh_identity_file=None):
     """
     checks if ssh can successfully be performed to all the hosts.
     :param host_addresses: list of addresses to ssh into. for example,
@@ -83,12 +83,18 @@ def _check_all_hosts_ssh_successful(host_addresses, ssh_port=None, ssh_identity_
                 output.close()
         return exit_code, output_msg
 
+    ssh_port_per_host = driver_service.get_ssh_port_args(
+        host_addresses,
+        ssh_port=ssh_port,
+        ssh_ports=ssh_ports
+    )
     args_list = [[get_remote_command(local_command='true',
                                      host=host_address,
-                                     port=ssh_port,
+                                     port=port,
                                      identity_file=ssh_identity_file,
                                      timeout_s=SSH_CONNECT_TIMEOUT_S)]
-                 for host_address in host_addresses]
+                 for host_address, port in zip(host_addresses, ssh_port_per_host)]
+
     ssh_exit_codes = \
         threads.execute_function_multithreaded(exec_command,
                                                args_list)
@@ -298,6 +304,10 @@ def parse_args():
     group_ssh = parser.add_argument_group('SSH arguments')
     group_ssh.add_argument('-p', '--ssh-port', action='store', dest='ssh_port',
                            type=int, help='SSH port on all the hosts.')
+
+    parser.add_argument('--ssh-ports', action='store', dest='ssh_ports',
+                    type=str, help='Comma-separated string of SSH ports for each host.')
+
     group_ssh.add_argument('-i', '--ssh-identity-file', action='store', dest='ssh_identity_file',
                            help='File on the driver from which the identity (private key) is read.')
 
@@ -539,6 +549,7 @@ def _run_static(args):
                                     'parameter if you have too many servers.')
     settings = hvd_settings.Settings(verbose=2 if args.verbose else 0,
                                      ssh_port=args.ssh_port,
+                                     ssh_ports=args.ssh_ports,
                                      ssh_identity_file=args.ssh_identity_file,
                                      extra_mpi_args=args.mpi_args,
                                      tcp_flag=args.tcp_flag,
