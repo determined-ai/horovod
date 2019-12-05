@@ -1,6 +1,14 @@
 import tensorflow as tf
 
 
+def apply_op_to_not_none_tensors(tensor_op, tensors, *args):
+    return [tensor_op(tensor, *args) if tensor is not None else tensor for tensor in tensors]
+
+
+def get_not_none_from_list(tensor_list):
+    return [x for x in tensor_list if x is not None]
+
+
 class LocalGradientAggregationHelper:
     def __init__(self, aggregation_frequency, allreduce_func, sparse_as_dense,
                  grad_updated_sizes_dict):
@@ -26,6 +34,14 @@ class LocalGradientAggregationHelper:
         # there are grads that have dynamically set shapes.
         self.grad_updated_sizes_dict = grad_updated_sizes_dict
 
+        # Contains the mapping of indexes of grad updates that are
+        # not None to their index in gpu shadow vars which only
+        # contains not None gradients. When performing gradient
+        # aggregation we have to remove them from the list of grads
+        # prior passing them into a tf.cond().
+        self.not_none_indexes = {}
+        self.num_none_grad_updates = 0
+
     def init_aggregation_vars(self, grads, sess=None):
         with tf.variable_scope("aggregation_variables"):
             self.counter = tf.get_variable(
@@ -41,6 +57,11 @@ class LocalGradientAggregationHelper:
                             "`self._aggregation_frequency` > 1 and "
                             "`self._sparse_as_dense` is False"
                         )
+                    if grad is None:
+                        self.num_none_grad_updates += 1
+                        continue
+                    self.not_none_indexes[idx] = len(self.gpu_shadow_vars)
+
                     if self.grad_updated_sizes_dict:
                         if str(idx) not in self.grad_updated_sizes_dict:
                             raise AssertionError
@@ -51,15 +72,16 @@ class LocalGradientAggregationHelper:
                     grad_aggregation_variable = tf.get_variable(
                         grad_aggregation_variable_name, shape=tensor_shape,
                         trainable=False, initializer=tf.zeros_initializer(), dtype=grad.dtype,
-                        collections=[tf.GraphKeys.LOCAL_VARIABLES, "aggregating_collection"])
+                        collections=[tf.GraphKeys.LOCAL_VARIABLES, "aggregating_collection"],
+                    )
                     self.gpu_shadow_vars.append(grad_aggregation_variable)
-                assert len(self.gpu_shadow_vars) == len(grads)
+                assert len(self.gpu_shadow_vars) + self.num_none_grad_updates == len(grads)
 
         # We expect to get a `sess` when we need to manually do a `sess.run(...)`
         # for the variables to be initialized.
         if sess:
             vars_init_op = tf.variables_initializer(
-                [self.counter, *self.gpu_shadow_vars]
+                [self.counter, *get_not_none_from_list(self.gpu_shadow_vars)]
             )
             sess.run(vars_init_op)
 
@@ -74,6 +96,8 @@ class LocalGradientAggregationHelper:
     def _aggregate_grads(self, grads):
         aggregation_ops_list = []
         if self.aggregation_frequency > 1:
+            grads = get_not_none_from_list(grads)
+            assert len(grads) == len(self.gpu_shadow_vars)
             for idx, grad in enumerate(grads):
                 if self._sparse_as_dense and isinstance(grad, tf.IndexedSlices):
                     grad = tf.convert_to_tensor(grad)
@@ -100,17 +124,26 @@ class LocalGradientAggregationHelper:
 
         with tf.control_dependencies([aggregation_read_ops]):
             averaged_gradients = self._allreduce_grads(aggregated_grads)
-            with tf.control_dependencies([g.op for g in averaged_gradients]):
+            with tf.control_dependencies([g.op for g in averaged_gradients if g is not None]):
                 reset_op = self.counter.assign(
                     tf.constant(0), use_locking=True)
             with tf.control_dependencies([reset_op]):
                 if self.aggregation_frequency > 1:
-                    return tuple(tf.divide(g, self.aggregation_frequency) for g in averaged_gradients)
+                    averaged_gradients = apply_op_to_not_none_tensors(
+                        tf.divide,
+                        averaged_gradients,
+                        self.aggregation_frequency,
+                    )
+                    return averaged_gradients
                 else:
                     # When grad updates are represented in `IndexedSlices`, we can not divide
                     # them by int. Currently aggregation_frequency > 1 is not supported
                     # `IndexedSlices`.
-                    return tuple(tf.identity(g) for g in averaged_gradients)
+                    averaged_gradients = apply_op_to_not_none_tensors(
+                        tf.identity,
+                        averaged_gradients,
+                    )
+                    return averaged_gradients
 
     def compute_gradients(self, grads):
         if self.aggregation_frequency > 1:
@@ -126,18 +159,30 @@ class LocalGradientAggregationHelper:
 
         with tf.control_dependencies([update_counter]):
             if self.aggregation_frequency > 1:
+                grads = get_not_none_from_list(grads)
+                assert len(grads) == len(self.gpu_shadow_vars)
                 allreduced_grads = tf.cond(
                     tf.equal(self.counter, self.aggregation_frequency),
                     lambda: self._allreduce_grads_helper(grads),
                     lambda: grads,
                 )
+                assert len(allreduced_grads) == len(self.gpu_shadow_vars)
+                allreduced_grads = [
+                    allreduced_grads[self.not_none_indexes[idx]] if idx in self.not_none_indexes else None
+                    for idx in range(len(self.gpu_shadow_vars) + self.num_none_grad_updates)
+                ]
+                assert len(allreduced_grads) == len(self.gpu_shadow_vars) + self.num_none_grad_updates
             else:
                 allreduced_grads = self._allreduce_grads_helper(grads)
 
-        with tf.control_dependencies([tf.group(*allreduced_grads)]):
-            return tuple(tf.identity(grad) for grad in allreduced_grads)
+        with tf.control_dependencies([tf.group(*get_not_none_from_list(allreduced_grads))]):
+            allreduced_grads = apply_op_to_not_none_tensors(
+                tf.identity,
+                allreduced_grads,
+            )
+            return tuple(allreduced_grads)
 
     def apply_gradients(self, apply_grads_closure, *args, **kwargs):
         flattended_args0 = [item for tup in args[0] for item in tup]
-        with tf.control_dependencies([tf.group(*flattended_args0)]):
+        with tf.control_dependencies([tf.group(*get_not_none_from_list(flattended_args0))]):
             return tf.cond(tf.equal(self.counter, 0), apply_grads_closure, tf.no_op)
