@@ -184,5 +184,17 @@ class LocalGradientAggregationHelper:
 
     def apply_gradients(self, apply_grads_closure, *args, **kwargs):
         flattended_args0 = [item for tup in args[0] for item in tup]
+
+        def increment_global_step_counter():
+            global_step_counter = tf.train.get_global_step()
+            return global_step_counter.assign_add(
+                tf.constant(self.aggregation_frequency-1, dtype=tf.int64),
+                use_locking=True,
+                read_value=False
+            )
+
+        cond_increment_global_step_counter = tf.cond(tf.equal(self.counter, 0), increment_global_step_counter, tf.no_op)
+        flattended_args0.append(cond_increment_global_step_counter)
+
         with tf.control_dependencies([tf.group(*get_not_none_from_list(flattended_args0))]):
             return tf.cond(tf.equal(self.counter, 0), apply_grads_closure, tf.no_op)
