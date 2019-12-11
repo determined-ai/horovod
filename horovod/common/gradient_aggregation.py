@@ -187,6 +187,8 @@ class LocalGradientAggregationHelper:
 
         def increment_global_step_counter():
             global_step_counter = tf.train.get_global_step()
+            if global_step_counter is None:
+                return tf.no_op()
             return global_step_counter.assign_add(
                 tf.constant(self.aggregation_frequency-1, dtype=tf.int64),
                 use_locking=True,
