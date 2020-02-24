@@ -234,7 +234,8 @@ if _LegacyOptimizer is not None:
 
         def __init__(self, optimizer, name=None, use_locking=False, device_dense='',
                     device_sparse='', compression=Compression.none,
-                    sparse_as_dense=False, aggregation_frequency=1):
+                    sparse_as_dense=False, aggregation_frequency=1,
+                    average_aggregated_gradients=True):
             if name is None:
                 name = "Distributed{}".format(type(optimizer).__name__)
             super(_DistributedOptimizer, self).__init__(name=name, use_locking=use_locking)
@@ -243,7 +244,13 @@ if _LegacyOptimizer is not None:
             self._allreduce_grads = _make_allreduce_grads_fn(
                 name, device_dense, device_sparse, compression, sparse_as_dense)
 
-            self._agg_helper = LocalGradientAggregationHelper(aggregation_frequency, self._allreduce_grads, sparse_as_dense, None)
+            self._agg_helper = LocalGradientAggregationHelper(
+                aggregation_frequency=aggregation_frequency,
+                allreduce_func=self._allreduce_grads,
+                sparse_as_dense=sparse_as_dense,
+                grad_updated_sizes_dict=None,
+                average_aggregated_gradients=average_aggregated_gradients
+            )
 
         def compute_gradients(self, *args, **kwargs):
             """Compute gradients of all trainable variables.
@@ -281,7 +288,8 @@ if _LegacyOptimizer is not None:
 
 def DistributedOptimizer(optimizer, name=None, use_locking=False, device_dense='',
                          device_sparse='', compression=Compression.none,
-                         sparse_as_dense=False, aggregation_frequency=1):
+                         sparse_as_dense=False, aggregation_frequency=1,
+                         average_aggregated_gradients=True):
     """Construct a new DistributedOptimizer, which uses another optimizer
     under the hood for computing single-process gradient values and
     applying gradient updates after the gradient values have been averaged
@@ -311,16 +319,37 @@ def DistributedOptimizer(optimizer, name=None, use_locking=False, device_dense='
         Treat all sparse gradients as dense tensors.  This can help improve
         performance and memory utilization if the original sparse gradient
         has high density.  Defaults to false.
-      aggregation_frequency: How many batches to aggregate the gradients before
-                             averaging the gradients with allreduce.
+      aggregation_frequency:
+        How many batches to aggregate the gradients before communicating the
+        gradients with allreduce.
+      average_aggregated_gradients:
+        Whether to average the aggregated gradients
+        across the iterations. Only possible for aggregation_frequency > 1.
     """
     if isinstance(optimizer, _LegacyOptimizer):
-        return _DistributedOptimizer(optimizer, name, use_locking, device_dense,
-                                     device_sparse, compression, sparse_as_dense, aggregation_frequency)
+        return _DistributedOptimizer(
+            optimizer=optimizer,
+            name=name,
+            use_locking=use_locking,
+            device_dense=device_dense,
+            device_sparse=device_sparse,
+            compression=compression,
+            sparse_as_dense=sparse_as_dense,
+            aggregation_frequency=aggregation_frequency,
+            average_aggregated_gradients=average_aggregated_gradients
+        )
     elif isinstance(optimizer, tf.keras.optimizers.Optimizer):
         import horovod.tensorflow.keras as hvd_k
-        return hvd_k.DistributedOptimizer(optimizer, name, device_dense, device_sparse,
-                                          compression, sparse_as_dense)
+        return hvd_k.DistributedOptimizer(
+            optimizer=optimizer,
+            name=name,
+            device_dense=device_dense,
+            device_sparse=device_sparse,
+            compression=compression,
+            sparse_as_dense=sparse_as_dense,
+            aggregation_frequency=aggregation_frequency,
+            average_aggregated_gradients=average_aggregated_gradients,
+        )
     else:
         raise ValueError('Provided optimizer doesn\'t inherit from either legacy '
                          'TensorFlow or Keras optimizer: %s' % optimizer)

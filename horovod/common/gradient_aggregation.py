@@ -11,12 +11,15 @@ def get_not_none_from_list(tensor_list):
 
 class LocalGradientAggregationHelper:
     def __init__(self, aggregation_frequency, allreduce_func, sparse_as_dense,
-                 grad_updated_sizes_dict):
+                 grad_updated_sizes_dict, average_aggregated_gradients):
         self._allreduce_grads = allreduce_func
 
         # How often are parameters synchronized
         self.aggregation_frequency = aggregation_frequency
         assert self.aggregation_frequency > 0
+
+        # Should the aggregated parameters be averaged.
+        self.average_aggregated_gradients = average_aggregated_gradients
 
         # This is going to be N data structure holding the aggregated gradient updates
         # for parameter updates. N is the number of parameters.
@@ -129,10 +132,12 @@ class LocalGradientAggregationHelper:
                     tf.constant(0), use_locking=True)
             with tf.control_dependencies([reset_op]):
                 if self.aggregation_frequency > 1:
+                    gradient_divisor = self.aggregation_frequency if \
+                        self.average_aggregated_gradients else 1
                     averaged_gradients = apply_op_to_not_none_tensors(
                         tf.divide,
                         averaged_gradients,
-                        self.aggregation_frequency,
+                        gradient_divisor,
                     )
                     return averaged_gradients
                 else:

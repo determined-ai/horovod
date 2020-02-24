@@ -43,7 +43,7 @@ def DistributedOptimizer(optimizer, name=None,
                          compression=Compression.none,
                          sparse_as_dense=False, aggregation_frequency=1,
                          grad_updated_sizes_dict=None, profile_frequency=0,
-                         profile_filename=None):
+                         profile_filename=None, average_aggregated_gradients=False):
     """
     An optimizer that wraps another keras.optimizers.Optimizer, using an allreduce to
     average gradient values before applying gradients to model weights.
@@ -71,12 +71,15 @@ def DistributedOptimizer(optimizer, name=None,
         profile_frequency: How often (in terms of number of batches) to profile
                            the commnication time of the batch.
         profile_filename: Name of the file to write profiling logs to.
+        average_aggregated_gradients: Whether to average the aggregated gradients
+                                      across the iterations. Only possible for
+                                      aggregation_frequency > 1.
         """
     return _impl.create_distributed_optimizer(keras, optimizer, name,
                                               device_dense, device_sparse, compression,
                                               sparse_as_dense, aggregation_frequency,
                                               grad_updated_sizes_dict, profile_frequency,
-                                              profile_filename)
+                                              profile_filename, average_aggregated_gradients)
 
 
 def broadcast_global_variables(root_rank):

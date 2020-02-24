@@ -42,11 +42,12 @@ def _make_allreduce_grads_fn(device_dense, device_sparse, compression):
 
 def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sparse,
                                  compression, sparse_as_dense, aggregation_frequency,
-                                 grad_updated_sizes_dict, profile_frequency, profile_filename):
+                                 grad_updated_sizes_dict, profile_frequency, profile_filename,
+                                 average_aggregated_gradients):
     class _DistributedOptimizer(keras.optimizers.Optimizer):
         def __init__(self, name, device_dense, device_sparse, compression, sparse_as_dense,
                      config, aggregation_frequency, grad_updated_sizes_dict, profile_frequency,
-                     profile_filename):
+                     profile_filename, average_aggregated_gradients):
             if name is None:
                 name = "Distributed%s" % self.__class__.__base__.__name__
             self._name = name
@@ -60,7 +61,8 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                 aggregation_frequency,
                 _make_allreduce_grads_fn(device_dense, device_sparse, compression),
                 sparse_as_dense,
-                grad_updated_sizes_dict
+                grad_updated_sizes_dict,
+                average_aggregated_gradients
             )
             self._profile_helper = TFProfileHelper(profile_frequency, profile_filename)
 
@@ -108,7 +110,9 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
 
         @classmethod
         def from_config(cls, cfg):
-            return cls(name, device_dense, device_sparse, compression, sparse_as_dense, cfg)
+            return cls(name, device_dense, device_sparse, compression, sparse_as_dense, cfg,
+                       aggregation_frequency, grad_updated_sizes_dict, profile_frequency,
+                       profile_filename, average_aggregated_gradients)
 
     # We dynamically create a new class that inherits from the optimizer that was passed in.
     # The goal is to override get_gradients() method with an allreduce implementation.
@@ -118,7 +122,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                dict(_DistributedOptimizer.__dict__))
     return cls(name, device_dense, device_sparse, compression, sparse_as_dense,
                optimizer.get_config(), aggregation_frequency, grad_updated_sizes_dict, profile_frequency,
-               profile_filename)
+               profile_filename, average_aggregated_gradients)
 
 
 def _eval(backend, op_or_result):
