@@ -50,7 +50,6 @@ class LocalGradientAggregationHelper:
             self.counter = tf.compat.v1.get_variable(
                 "aggregation_counter", shape=(), dtype=tf.int32,
                 trainable=False, initializer=tf.compat.v1.zeros_initializer())
-
             for idx, grad in enumerate(grads):
                 if self._sparse_as_dense and isinstance(grad, tf.IndexedSlices):
                     grad = tf.convert_to_tensor(value=grad)

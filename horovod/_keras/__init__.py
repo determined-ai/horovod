@@ -18,6 +18,7 @@ from distutils.version import LooseVersion
 import horovod.tensorflow as hvd
 import tensorflow as tf
 from horovod.common.gradient_aggregation import LocalGradientAggregationHelper
+from horovod.common.gradient_aggregation_eager import LocalGradientAggregationHelperEager
 
 
 _PRE_TF_2_4_0 = LooseVersion(tf.__version__) < LooseVersion('2.4.0')
@@ -52,6 +53,13 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                         sparse_as_dense=sparse_as_dense,
                         average_aggregated_gradients=average_aggregated_gradients,
                         optimizer_type=LocalGradientAggregationHelper._OPTIMIZER_TYPE_KERAS,
+                    )
+                else:
+                    self._agg_helper = LocalGradientAggregationHelperEager(
+                        aggregation_frequency=aggregation_frequency,
+                        allreduce_func=self._allreduce_grads,
+                        sparse_as_dense=sparse_as_dense,
+                        average_aggregated_gradients=average_aggregated_gradients,
                     )
 
             super(self.__class__, self).__init__(**kwargs)
@@ -98,8 +106,8 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
 
             if not self._aggregated_gradients:
                 raise Exception('`apply_gradients()` was called without a call to '
-                                '`get_gradients()` or `_aggregate_gradients`. If you\'re '
-                                'using TensorFlow 2.0, please specify '
+                                '`get_gradients()`or `_aggregate_gradients` . If you\'re using '
+                                'TensorFlow 2.0 or 2.1, please specify '
                                 '`experimental_run_tf_function=False` in `compile()`.')
 
             return result
