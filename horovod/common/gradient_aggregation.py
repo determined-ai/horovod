@@ -46,14 +46,14 @@ class LocalGradientAggregationHelper:
         self.num_none_grad_updates = 0
 
     def init_aggregation_vars(self, grads, sess=None):
-        with tf.variable_scope("aggregation_variables"):
-            self.counter = tf.get_variable(
+        with tf.compat.v1.variable_scope("aggregation_variables"):
+            self.counter = tf.compat.v1.get_variable(
                 "aggregation_counter", shape=(), dtype=tf.int32,
-                trainable=False, initializer=tf.zeros_initializer())
+                trainable=False, initializer=tf.compat.v1.zeros_initializer())
             if self.aggregation_frequency > 1:
                 for idx, grad in enumerate(grads):
                     if self._sparse_as_dense and isinstance(grad, tf.IndexedSlices):
-                        grad = tf.convert_to_tensor(grad)
+                        grad = tf.convert_to_tensor(value=grad)
                     elif isinstance(grad, tf.IndexedSlices):
                         raise AssertionError(
                             "IndexedSlices are not supported when "
@@ -72,10 +72,10 @@ class LocalGradientAggregationHelper:
                     else:
                         tensor_shape = grad.get_shape().as_list()
                     grad_aggregation_variable_name = str(idx)
-                    grad_aggregation_variable = tf.get_variable(
+                    grad_aggregation_variable = tf.compat.v1.get_variable(
                         grad_aggregation_variable_name, shape=tensor_shape,
-                        trainable=False, initializer=tf.zeros_initializer(), dtype=grad.dtype,
-                        collections=[tf.GraphKeys.LOCAL_VARIABLES, "aggregating_collection"],
+                        trainable=False, initializer=tf.compat.v1.zeros_initializer(), dtype=grad.dtype,
+                        collections=[tf.compat.v1.GraphKeys.LOCAL_VARIABLES, "aggregating_collection"],
                     )
                     self.gpu_shadow_vars.append(grad_aggregation_variable)
                 assert len(self.gpu_shadow_vars) + self.num_none_grad_updates == len(grads)
@@ -83,7 +83,7 @@ class LocalGradientAggregationHelper:
         # We expect to get a `sess` when we need to manually do a `sess.run(...)`
         # for the variables to be initialized.
         if sess:
-            vars_init_op = tf.variables_initializer(
+            vars_init_op = tf.compat.v1.variables_initializer(
                 [self.counter, *get_not_none_from_list(self.gpu_shadow_vars)]
             )
             sess.run(vars_init_op)
@@ -103,7 +103,7 @@ class LocalGradientAggregationHelper:
             assert len(grads) == len(self.gpu_shadow_vars)
             for idx, grad in enumerate(grads):
                 if self._sparse_as_dense and isinstance(grad, tf.IndexedSlices):
-                    grad = tf.convert_to_tensor(grad)
+                    grad = tf.convert_to_tensor(value=grad)
                 grad_aggregator = self.gpu_shadow_vars[idx]
                 updated_grad_aggregator = grad_aggregator.assign_add(grad)
                 aggregation_ops_list.append(updated_grad_aggregator)
@@ -152,7 +152,7 @@ class LocalGradientAggregationHelper:
 
     def compute_gradients(self, grads):
         if self.aggregation_frequency > 1:
-            clear_op = tf.cond(tf.equal(self.counter, 0), lambda: self._clear_grads(), tf.no_op)
+            clear_op = tf.cond(pred=tf.equal(self.counter, 0), true_fn=lambda: self._clear_grads(), false_fn=tf.no_op)
             with tf.control_dependencies([clear_op]):
                 aggregation_ops_list = self._aggregate_grads(grads)
 
@@ -167,9 +167,9 @@ class LocalGradientAggregationHelper:
                 grads = get_not_none_from_list(grads)
                 assert len(grads) == len(self.gpu_shadow_vars)
                 allreduced_grads = tf.cond(
-                    tf.equal(self.counter, self.aggregation_frequency),
-                    lambda: self._allreduce_grads_helper(grads),
-                    lambda: grads,
+                    pred=tf.equal(self.counter, self.aggregation_frequency),
+                    true_fn=lambda: self._allreduce_grads_helper(grads),
+                    false_fn=lambda: grads,
                 )
                 if not isinstance(allreduced_grads, (list, tuple)):
                     allreduced_grads = (allreduced_grads,)
@@ -193,7 +193,7 @@ class LocalGradientAggregationHelper:
         flattended_args0 = [item for tup in args[0] for item in tup]
 
         def increment_global_step_counter():
-            global_step_counter = tf.train.get_global_step()
+            global_step_counter = tf.compat.v1.train.get_global_step()
             if global_step_counter is None:
                 return tf.no_op()
             return global_step_counter.assign_add(
@@ -202,8 +202,8 @@ class LocalGradientAggregationHelper:
                 read_value=False
             )
 
-        cond_increment_global_step_counter = tf.cond(tf.equal(self.counter, 0), increment_global_step_counter, tf.no_op)
+        cond_increment_global_step_counter = tf.cond(pred=tf.equal(self.counter, 0), true_fn=increment_global_step_counter, false_fn=tf.no_op)
         flattended_args0.append(cond_increment_global_step_counter)
 
         with tf.control_dependencies([tf.group(*get_not_none_from_list(flattended_args0))]):
-            return tf.cond(tf.equal(self.counter, 0), apply_grads_closure, tf.no_op)
+            return tf.cond(pred=tf.equal(self.counter, 0), true_fn=apply_grads_closure, false_fn=tf.no_op)

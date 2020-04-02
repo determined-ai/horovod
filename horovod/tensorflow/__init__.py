@@ -18,7 +18,6 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-from distutils.version import LooseVersion
 
 from horovod.common.util import check_extension
 from horovod.common.gradient_aggregation import LocalGradientAggregationHelper
@@ -245,14 +244,13 @@ if _LegacyOptimizer is not None:
             self._allreduce_grads = _make_allreduce_grads_fn(
                 name, device_dense, device_sparse, compression, sparse_as_dense)
 
-            if LooseVersion(tf.__version__) < LooseVersion("2.0.0"):
-                self._agg_helper = LocalGradientAggregationHelper(
-                    aggregation_frequency=aggregation_frequency,
-                    allreduce_func=self._allreduce_grads,
-                    sparse_as_dense=sparse_as_dense,
-                    grad_updated_sizes_dict=None,
-                    average_aggregated_gradients=average_aggregated_gradients
-                )
+            self._agg_helper = LocalGradientAggregationHelper(
+                aggregation_frequency=aggregation_frequency,
+                allreduce_func=self._allreduce_grads,
+                sparse_as_dense=sparse_as_dense,
+                grad_updated_sizes_dict=None,
+                average_aggregated_gradients=average_aggregated_gradients
+            )
 
         def compute_gradients(self, *args, **kwargs):
             """Compute gradients of all trainable variables.
@@ -265,22 +263,15 @@ if _LegacyOptimizer is not None:
             gradients = self._optimizer.compute_gradients(*args, **kwargs)
             if size() > 1:
                 self.grads, vars = zip(*gradients)
-
-                if LooseVersion(tf.__version__) < LooseVersion("2.0.0"):
-                    self._agg_helper.init_aggregation_vars(self.grads)
-                    allreduced_grads = self._agg_helper.compute_gradients(self.grads)
-                else:
-                    allreduced_grads = self._allreduce_grads(self.grads)
+                self._agg_helper.init_aggregation_vars(self.grads)
+                allreduced_grads = self._agg_helper.compute_gradients(self.grads)
                 return list(zip(allreduced_grads, vars))
             else:
                 return gradients
 
         def apply_gradients(self, *args, **kwargs):
             """Calls this same method from the local gradient aggregation helper."""
-            if LooseVersion(tf.__version__) < LooseVersion("2.0.0"):
-                return self._agg_helper.apply_gradients(lambda: self._optimizer.apply_gradients(*args, **kwargs), *args, **kwargs)
-            else:
-                return self._optimizer.apply_gradients(*args, **kwargs)
+            return self._agg_helper.apply_gradients(lambda: self._optimizer.apply_gradients(*args, **kwargs), *args, **kwargs)
 
         def get_slot(self, *args, **kwargs):
             """Calls this same method on the underlying optimizer."""
