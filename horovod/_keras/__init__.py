@@ -57,7 +57,11 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
             self._sparse_as_dense = sparse_as_dense
             self._aggregated_gradients = False
 
-            if not hvd._executing_eagerly():
+            # We save the result of this because `get_gradients` and
+            # `apply_gradients` do not execute eagerly.
+            self._executing_eagerly = hvd._executing_eagerly()
+
+            if not self._executing_eagerly:
                 self._agg_helper = LocalGradientAggregationHelper(
                     aggregation_frequency,
                     _make_allreduce_grads_fn(device_dense, device_sparse, compression),
@@ -81,7 +85,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
             self._aggregated_gradients = True
             self.grads = super(
                 self.__class__, self).get_gradients(loss, params)
-            if hvd._executing_eagerly():
+            if self._executing_eagerly():
                 return self._allreduce(self.grads)
             else:
                 if hvd.size() > 1:
@@ -125,7 +129,7 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                                 'please specify `experimental_run_tf_function=False` in '
                                 '`compile()`.')
 
-            if hvd._executing_eagerly():
+            if self._executing_eagerly():
                 return super(self.__class__, self).apply_gradients(*args, **kwargs)
             else:
                 return self._agg_helper.apply_gradients(
