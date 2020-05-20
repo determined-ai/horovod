@@ -65,8 +65,5 @@ class Settings(object):
         self.run_func_mode = run_func_mode
         self.nics = nics
 
-    # we do not serialize the key, as it is too risky that it could leak unintentionally
     def __getstate__(self):
-        result = self.__dict__.copy()
-        result['key'] = None
-        return result
+        return self.__dict__.copy()
