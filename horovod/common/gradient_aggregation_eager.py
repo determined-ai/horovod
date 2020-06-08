@@ -47,7 +47,7 @@ class LocalGradientAggregationHelperEager:
         # Used to know when to allreduce and apply gradients. We allreduce when `self.counter`
         # is equal to `self.aggregation_frequency`. We apply gradients when `self.counter` is
         # equal to 0.
-        self.counter = tf.Variable(initial_value=0)
+        self.counter = 0
 
         self._sparse_as_dense = sparse_as_dense
 
@@ -56,6 +56,7 @@ class LocalGradientAggregationHelperEager:
 
     @tf_function_before_tf_2_2
     def compute_gradients(self, grads):
+        print(f"compuate gradients {tf.executing_eagerly()}")
         if self.aggregation_frequency == 1:
             return self._allreduce_helper(grads)
 
@@ -77,7 +78,7 @@ class LocalGradientAggregationHelperEager:
 
         assert len(self.shadow_var) + self.num_none_grad_updates == len(grads)
 
-        self.counter.assign_add(1)
+        self.counter += 1
         if tf.equal(self.counter, self.aggregation_frequency):
             resulting_grads = self._allreduce_helper(resulting_grads)
             assert len(resulting_grads) == len(self.shadow_var)
@@ -105,11 +106,11 @@ class LocalGradientAggregationHelperEager:
         return allreduced_grads
 
     def _clear_vars(self):
-        self.counter.assign(0)
+        self.counter = 0
         for idx in self.shadow_var.keys():
             self.shadow_var[idx].assign_add(-1 * self.shadow_var[idx])
 
     @tf_function_before_tf_2_2
     def apply_gradients(self, apply_grads_closure, *args, **kwargs):
-        if tf.equal(self.counter, 0):
+        if self.counter == 0:
             apply_grads_closure()
