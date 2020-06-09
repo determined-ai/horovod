@@ -56,7 +56,6 @@ class LocalGradientAggregationHelperEager:
 
     @tf_function_before_tf_2_2
     def compute_gradients(self, grads):
-        print(f"compuate gradients {tf.executing_eagerly()}")
         if self.aggregation_frequency == 1:
             return self._allreduce_helper(grads)
 
