@@ -1,26 +1,4 @@
-import functools
-import os
 import tensorflow as tf
-from distutils import util
-from packaging import version
-
-
-def tf_function_before_tf_2_2(func):
-    if version.parse(tf.__version__) < version.parse("2.2.0") \
-            or util.strtobool(os.getenv("ENABLE_TF_FUNCTION_FOR_ALLREDUCE", "False")):
-        @functools.wraps(func)
-        @tf.function
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    else:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
-
-        return wrapper
 
 
 class LocalGradientAggregationHelperEager:
@@ -47,14 +25,14 @@ class LocalGradientAggregationHelperEager:
         # Used to know when to allreduce and apply gradients. We allreduce when `self.counter`
         # is equal to `self.aggregation_frequency`. We apply gradients when `self.counter` is
         # equal to 0.
-        self.counter = 0
+        self.counter = tf.Variable(initial_value=0)
 
         self._sparse_as_dense = sparse_as_dense
 
         # Used to keep track of the number of None gradient updates.
         self.num_none_grad_updates = 0
 
-    @tf_function_before_tf_2_2
+    @tf.function
     def compute_gradients(self, grads):
         if self.aggregation_frequency == 1:
             return self._allreduce_helper(grads)
@@ -77,7 +55,7 @@ class LocalGradientAggregationHelperEager:
 
         assert len(self.shadow_var) + self.num_none_grad_updates == len(grads)
 
-        self.counter += 1
+        self.counter.assign_add(1)
         if tf.equal(self.counter, self.aggregation_frequency):
             resulting_grads = self._allreduce_helper(resulting_grads)
             assert len(resulting_grads) == len(self.shadow_var)
@@ -95,7 +73,7 @@ class LocalGradientAggregationHelperEager:
 
     def _allreduce_helper(self, grads):
         allreduced_grads = self._allreduce_grads(grads)
-        if self.aggregation_frequency > 1:
+        if tf.math.greater(self.aggregation_frequency, 1):
             gradient_divisor = (
                 self.aggregation_frequency if self.average_aggregated_gradients else 1
             )
@@ -105,11 +83,11 @@ class LocalGradientAggregationHelperEager:
         return allreduced_grads
 
     def _clear_vars(self):
-        self.counter = 0
+        self.counter.assign(0)
         for idx in self.shadow_var.keys():
             self.shadow_var[idx].assign_add(-1 * self.shadow_var[idx])
 
-    @tf_function_before_tf_2_2
+    @tf.function
     def apply_gradients(self, apply_grads_closure, *args, **kwargs):
-        if self.counter == 0:
+        if tf.equal(self.counter, 0):
             apply_grads_closure()
