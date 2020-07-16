@@ -87,7 +87,5 @@ class LocalGradientAggregationHelperEager:
         for idx in self.shadow_var.keys():
             self.shadow_var[idx].assign_add(-1 * self.shadow_var[idx])
 
-    @tf.function
     def apply_gradients(self, apply_grads_closure, *args, **kwargs):
-        if tf.equal(self.counter, 0):
-            apply_grads_closure()
+        tf.cond(tf.equal(self.counter, 0), apply_grads_closure, tf.no_op)
