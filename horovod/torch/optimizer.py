@@ -142,7 +142,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
                     self._grad_accs.append(grad_acc)
 
     def _allreduce_grad_async(self, p):
-	if p.grad is None:
+        if p.grad is None:
             # Gradient was not computed, but we still need to submit a tensor to allreduce
             # as one of the other ranks may have computed it (due to dynamic forward functions).
             #
